@@ -196,8 +196,8 @@ tr.sel td{outline:1px solid var(--acc);outline-offset:-1px}
   </div>
   <div class="srcmsg" id="srcMsg"></div>
   <div class="srchelp">
-    預設是 <code>data.bin</code>，也就是和這個網頁放在同一個 GitHub repo 的 data.bin。<br>
-    如果 data.bin 放在另一個 repo（例如你的 NQ 復盤 repo），填它的 raw 網址：<code>https://raw.githubusercontent.com/你的帳號/repo名稱/main/data.bin</code>
+    預設是 nq-replay repo 的 data.bin：<code>https://raw.githubusercontent.com/SDKOPPWDO/nq-replay/main/data.bin</code><br>
+    你把新的 data.bin 推到 nq-replay 後，按「更新資料」就會抓最新版。GitHub 的 raw 網址可能有幾分鐘快取，剛推完沒變的話稍等再按。
   </div>
 </section>
 <div class="progress"><div id="bar"></div></div>
@@ -205,7 +205,7 @@ tr.sel td{outline:1px solid var(--acc);outline-offset:-1px}
 <section id="drop" class="drop">
   <div class="drop-inner">
     <div class="drop-icon">⇣</div>
-    <div class="drop-title">正在從 GitHub 載入 data.bin…</div>
+    <div class="drop-title">正在從 nq-replay 載入 data.bin…</div>
     <div class="drop-sub">如果一直沒有出現，請按右上角「資料來源」確認網址；也可以直接把 data.bin 拖到這裡。</div>
   </div>
 </section>
@@ -247,7 +247,7 @@ tr.sel td{outline:1px solid var(--acc);outline-offset:-1px}
 
 /* ===== 設定：要調整定義改這裡 ===== */
 const CFG = {
-  dataUrl: 'data.bin',    // 預設從同一個 GitHub Pages 資料夾抓 data.bin；也可以在畫面上的「資料來源」改成別的網址
+  dataUrl: 'https://raw.githubusercontent.com/SDKOPPWDO/nq-replay/main/data.bin',  // 預設從 nq-replay repo 抓；也可以在畫面上的「資料來源」改成別的網址
   pivotN: 2,              // 轉折定義：高點比前後各 N 根都高、低點比前後各 N 根都低
   barMin: 5,              // K 棒週期（分鐘）
   fullBars: 270,          // 少於這個根數視為未收盤（不列入常態分數基準）
@@ -730,7 +730,7 @@ function openSrc(msg) {
 $('#btnUpd').onclick = () => loadUrl();
 $('#btnSrc').onclick = () => ($('#srcPanel').hidden ? openSrc() : ($('#srcPanel').hidden = true));
 $('#srcClose').onclick = () => { $('#srcPanel').hidden = true; };
-$('#srcReset').onclick = () => { try { localStorage.removeItem(URL_KEY); } catch (e) { /* 忽略 */ } $('#srcInput').value = CFG.dataUrl; $('#srcMsg').textContent = '已改回預設：和網頁同一個資料夾的 data.bin'; };
+$('#srcReset').onclick = () => { try { localStorage.removeItem(URL_KEY); } catch (e) { /* 忽略 */ } $('#srcInput').value = CFG.dataUrl; $('#srcMsg').textContent = '已改回預設：nq-replay repo 的 data.bin'; };
 $('#srcSave').onclick = () => {
   const v = $('#srcInput').value.trim();
   if (!v) { $('#srcMsg').textContent = '請先填入網址'; return; }
