@@ -453,9 +453,17 @@ function mkChart(id, cfg) { if (charts[id]) charts[id].destroy(); charts[id] = n
 const tooltipStyle = { backgroundColor: '#0f1218', borderColor: '#2e3542', borderWidth: 1, titleColor: '#e8eaee', bodyColor: '#c4c9d4', padding: 10, displayColors: true, boxWidth: 8, boxHeight: 8 };
 
 
-function niceBin(range, target = 22) { const raw = range / target; const steps = [5, 10, 15, 20, 25, 50, 75, 100, 150, 200]; return steps.find((s) => s >= raw) || 250; }
+function niceBin(range, target = 22) { const raw = range / target; const steps = [1, 2, 5, 10, 15, 20, 25, 50, 75, 100, 150, 200]; return steps.find((s) => s >= raw) || 250; }
 
-function histogram(vals, w, lo) { const h = new Map(); vals.forEach((v) => { const k = Math.floor((v - lo) / w); h.set(k, (h.get(k) || 0) + 1); }); return h; }
+function histogram(vals, w, lo, nb) { const h = new Map(); vals.forEach((v) => { let k = Math.floor((v - lo) / w); if (nb && k > nb - 1) k = nb - 1; h.set(k, (h.get(k) || 0) + 1); }); return h; }
+// 橫軸上限：取所有資料的 90 百分位再多留 10%（極端值併到最後一格「≥」），避免少數大波段把圖壓扁
+function capRange(vals, target) {
+  if (!vals.length) return { w: niceBin(100, target), x: 100 };
+  const mx = Math.max(...vals), p = pctl(vals, .9) * 1.1;
+  const top = Math.min(mx, Math.max(p, 1));
+  const w = niceBin(top, target);
+  return { w, x: Math.max(w * 4, Math.ceil((top + 1e-9) / w) * w), clipped: mx >= Math.ceil((top + 1e-9) / w) * w };
+}
 
 const pctl = (a, p) => { if (!a.length) return null; const b = [...a].sort((x, y) => x - y); const k = (b.length - 1) * p, f = Math.floor(k); return b[f] + (b[Math.min(f + 1, b.length - 1)] - b[f]) * (k - f); };
 
@@ -478,7 +486,8 @@ function tileRow(cls, label, vals, countLabel, zr, unit) {
 }
 
 function histChart(id, vals, color, w, xmax, ymax, xTitle) {
-  const nb = Math.ceil(xmax / w), h = histogram(vals, w, 0), bars = [];
+  const nb = Math.round(xmax / w), h = histogram(vals, w, 0, nb), bars = [];
+  const nOver = vals.filter((v) => v >= xmax).length;
   for (let k = 0; k < nb; k++) bars.push({ x: k * w + w / 2, y: h.get(k) || 0 });
   const ds = [{ type: 'bar', data: bars, backgroundColor: hexA(color, .72), hoverBackgroundColor: color, barPercentage: 1, categoryPercentage: .88, borderRadius: 3, order: 2 }];
   const m = mean(vals), s = sd(vals), vl = [];
@@ -492,9 +501,9 @@ function histChart(id, vals, color, w, xmax, ymax, xTitle) {
     type: 'bar', data: { datasets: ds },
     options: {
       responsive: true, maintainAspectRatio: false, layout: { padding: { top: 6 } },
-      plugins: { legend: { display: false }, vlines: vl, tooltip: { ...tooltipStyle, displayColors: false, filter: (t) => t.dataset.type === 'bar', callbacks: { title: (t) => { const k = Math.floor(t[0].raw.x / w); return `${k * w}–${(k + 1) * w} 點`; }, label: (t) => ` ${t.raw.y} ${xTitle === '振幅' ? '根' : '段'}` } } },
+      plugins: { legend: { display: false }, vlines: vl, tooltip: { ...tooltipStyle, displayColors: false, filter: (t) => t.dataset.type === 'bar', callbacks: { title: (t) => { const k = Math.floor(t[0].raw.x / w); return (k === nb - 1 && nOver) ? `≥ ${fmt(k * w)} 點（含 ${nOver} 個超出圖外的極端值）` : `${fmt(k * w)}–${fmt((k + 1) * w)} 點`; }, label: (t) => ` ${t.raw.y} ${xTitle === '振幅' ? '根' : '段'}` } } },
       scales: {
-        x: { type: 'linear', min: 0, max: nb * w, offset: false, grid: { display: false }, ticks: { stepSize: w * Math.max(1, Math.ceil(nb / 5)), callback: (v) => fmt(v) } },
+        x: { type: 'linear', min: 0, max: nb * w, offset: false, grid: { display: false }, ticks: { stepSize: w * Math.max(1, Math.ceil(nb / 6)), callback: (v) => (v >= nb * w && nOver ? fmt(v) + '+' : fmt(v)) } },
         y: { min: 0, max: ymax, grid: { color: '#1b1f29' }, ticks: { precision: 0, maxTicksLimit: 5 } },
       },
     },
@@ -504,13 +513,13 @@ function histChart(id, vals, color, w, xmax, ymax, xTitle) {
 function renderSessions() {
   const d = DAYS[S.idx], box = $('#sessions');
   const swings = d.sess.flatMap((o) => [...o.up, ...o.dn]);
-  const sMax = swings.length ? Math.max(...swings) : 100, sW = niceBin(sMax, 16), sX = Math.ceil((sMax + 1e-9) / sW) * sW;
+  const { w: sW, x: sX } = capRange(swings, 30);
   const rngs = d.sess.flatMap((o) => o.rng || []);
-  const rMax = rngs.length ? Math.max(...rngs) : 100, rW = niceBin(rMax, 22), rX = Math.ceil((rMax + 1e-9) / rW) * rW;
+  const { w: rW, x: rX } = capRange(rngs, 40);
   let sY = 1, rY = 1;
   d.sess.forEach((o) => {
-    [o.up, o.dn].forEach((v) => histogram(v, sW, 0).forEach((c) => sY = Math.max(sY, c)));
-    histogram(o.rng || [], rW, 0).forEach((c) => rY = Math.max(rY, c));
+    [o.up, o.dn].forEach((v) => histogram(v, sW, 0, Math.round(sX / sW)).forEach((c) => sY = Math.max(sY, c)));
+    histogram(o.rng || [], rW, 0, Math.round(rX / rW)).forEach((c) => rY = Math.max(rY, c));
   });
   const niceY = (v) => { const t = Math.ceil(v * 1.1); const st = t <= 10 ? 2 : t <= 25 ? 5 : 10; return Math.ceil(t / st) * st; };
   sY = niceY(sY); rY = niceY(rY);
@@ -529,7 +538,7 @@ function renderSessions() {
       ${tileRow('rg', '振幅', o.rng || [], '根數', zOf(S.idx, s, 'rngMed'), '點')}
       <div class="clabel"><i style="background:${c.color}"></i>振幅分布</div>
       <div class="cbox h200"><canvas id="sr${s}"></canvas></div>
-      <div class="note">白色曲線＝依平均與標準差畫出的常態分布　┆ 白色虛線＝平均　│ 彩色實線＝中位數　三個時段使用相同刻度</div>`
+      <div class="note">白色曲線＝依平均與標準差畫出的常態分布　┆ 白色虛線＝平均　│ 彩色實線＝中位數　三個時段使用相同刻度　最右邊一格＝該值以上全部（滑鼠移上去看）</div>`
       : '<div class="empty">這個時段還沒有資料</div>';
     return `<div class="scard" style="--c:${c.color}">
       <div class="shead"><div><div class="sname">${c.name}</div><div class="stime">${sessTime(d, s)} · ${o.bars} 根 5 分 K</div></div>
