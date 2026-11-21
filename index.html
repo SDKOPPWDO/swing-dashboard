@@ -220,6 +220,7 @@ tr.sel td{outline:1px solid var(--acc);outline-offset:-1px}
 <main id="app" hidden>
   <section class="controls">
     <div class="ctl"><span>選擇日期</span><select id="daySel"></select></div>
+    <div class="ctl"><span>K 棒週期</span><div class="seg" id="tfSeg"></div></div>
     <div class="ctl" id="zCtl"><span>常態分數基準</span><div class="seg" id="zSeg"></div></div>
     <div class="ctl" id="rangeCtl" hidden><span>趨勢區間（到選定日期為止）</span><div class="seg" id="rangeSeg"></div></div>
     <div class="ctl" id="viewCtl" hidden><span>分布圖樣式</span><div class="seg" id="viewSeg"></div></div>
@@ -272,12 +273,13 @@ const METRICS = [
   { key: 'dnMed', name: '下跌波中位數', unit: '點' },
   { key: 'rngMed', name: '振幅中位數', unit: '點' },
 ];
-const STORE_KEY = 'swing-dashboard-v5';   // v5：多了時段總振幅，舊的快取不用
+const STORE_KEY = 'swing-dashboard-v7';   // v7：多了 1 分 K（波段＋振幅），舊的快取不用
 
 /* ===== 狀態 ===== */
 let DAYS = [];
-const S = { idx: -1, zN: 20, tab: 'day', range: 5, view: (() => { try { return localStorage.getItem('swing-dashboard-view') || 'dots'; } catch (e) { return 'dots'; } })() };
+const S = { idx: -1, zN: 20, tab: 'day', range: 5, tf: (() => { try { return +localStorage.getItem('swing-dashboard-tf') || 5; } catch (e) { return 5; } })(), view: (() => { try { return localStorage.getItem('swing-dashboard-view') || 'dots'; } catch (e) { return 'dots'; } })() };
 const charts = {};
+const KL = () => `${S.tf} 分 K`;   // 目前選的 K 棒週期文字
 const $ = (s) => document.querySelector(s);
 
 /* ===== 小工具 ===== */
@@ -374,18 +376,25 @@ function pivots(b, n) {
   }
   return p;
 }
+// 1 分 K：原始資料本身就是 1 分 K，直接用
+function build1(arr, start) {
+  return arr.map((x) => ({ off: (toMin(x.ts) - start + 1440) % 1440, o: x.o, h: x.h, l: x.l, c: x.c }));
+}
 function analyzeDay(date, arr) {
   const r = build5(arr); if (!r) return null;
-  const { start, b } = r, p = pivots(b, CFG.pivotN);
-  const sess = CFG.sessions.map(() => ({ up: [], dn: [], upN: [], dnN: [], seq: [], rng: [], bars: 0, hi: -Infinity, lo: Infinity }));
+  const { start, b } = r;
+  return { date, start, nb: b.length, partial: b.length < CFG.fullBars, sess: analyzeBars(b), sess1: analyzeBars(build1(arr, start)) };
+}
+function analyzeBars(b) {
+  const p = pivots(b, CFG.pivotN);
+  const sess = CFG.sessions.map(() => ({ up: [], dn: [], rng: [], bars: 0, hi: -Infinity, lo: Infinity }));
   b.forEach((x) => { const o = sess[sessOf(x.off)]; o.bars++; o.rng.push(+(x.h - x.l).toFixed(2)); if (x.h > o.hi) o.hi = x.h; if (x.l < o.lo) o.lo = x.l; });
   for (let k = 1; k < p.length; k++) {
-    const a = p[k - 1], c = p[k], d = c.v - a.v, n = c.i - a.i, o = sess[sessOf(b[c.i].off)];
-    if (d > 0) { o.up.push(+d.toFixed(2)); o.upN.push(n); } else if (d < 0) { o.dn.push(+(-d).toFixed(2)); o.dnN.push(n); }
-    if (d) o.seq.push([+d.toFixed(2), n, b[c.i].off]);
+    const a = p[k - 1], c = p[k], d = c.v - a.v, o = sess[sessOf(b[c.i].off)];
+    if (d > 0) o.up.push(+d.toFixed(2)); else if (d < 0) o.dn.push(+(-d).toFixed(2));
   }
   sess.forEach((o) => { o.cnt = o.bars ? o.up.length + o.dn.length : null; o.upMed = med(o.up); o.dnMed = med(o.dn); o.rngMed = med(o.rng); o.amp = o.bars ? +(o.hi - o.lo).toFixed(2) : null; delete o.hi; delete o.lo; });
-  return { date, start, nb: b.length, partial: b.length < CFG.fullBars, sess };
+  return sess;
 }
 
 /* 常態分數：以「前 N 個完整交易日」為基準 */
@@ -393,12 +402,12 @@ function baseline(i, s, key, N) {
   const vals = [];
   for (let k = i - 1; k >= 0 && vals.length < N; k--) {
     const d = DAYS[k]; if (d.partial) continue;
-    const v = d.sess[s][key]; if (v != null) vals.push(v);
+    const v = d.cur[s][key]; if (v != null) vals.push(v);
   }
   return { vals, m: mean(vals), s: sd(vals) };
 }
 function zOf(i, s, key, N = S.zN) {
-  const v = DAYS[i].sess[s][key]; const b = baseline(i, s, key, N);
+  const v = DAYS[i].cur[s][key]; const b = baseline(i, s, key, N);
   return { v, m: b.m, s: b.s, n: b.vals.length, z: v != null && b.s ? (v - b.m) / b.s : null };
 }
 
@@ -432,6 +441,7 @@ function renderControls() {
     o.textContent = DAYS[i].date + (DAYS[i].partial ? (i === DAYS.length - 1 ? '（未收盤）' : '（交易時間較短）') : ''); if (i === S.idx) o.selected = true; sel.appendChild(o);
   }
   sel.onchange = () => { S.idx = +sel.value; renderAll(); };
+    seg($('#tfSeg'), [5, 1].map((v) => ({ value: v, label: `${v} 分 K` })), S.tf, (v) => { S.tf = v; try { localStorage.setItem('swing-dashboard-tf', v); } catch (e) { /* 忽略 */ } renderAll(); });
     seg($('#zSeg'), [10, 20, 60].map((v) => ({ value: v, label: `前 ${v} 天` })), S.zN, (v) => { S.zN = v; renderAll(); });
     }
 
@@ -519,12 +529,12 @@ function histChart(id, vals, color, w, xmax, ymax, xTitle) {
 
 function renderSessions() {
   const d = DAYS[S.idx], box = $('#sessions');
-  const swings = d.sess.flatMap((o) => [...o.up, ...o.dn]);
+  const swings = d.cur.flatMap((o) => [...o.up, ...o.dn]);
   const { w: sW, x: sX } = capRange(swings, 30);
-  const rngs = d.sess.flatMap((o) => o.rng || []);
+  const rngs = d.cur.flatMap((o) => o.rng || []);
   const { w: rW, x: rX } = capRange(rngs, 40);
   let sY = 1, rY = 1;
-  d.sess.forEach((o) => {
+  d.cur.forEach((o) => {
     [o.up, o.dn].forEach((v) => histogram(v, sW, 0, Math.round(sX / sW)).forEach((c) => sY = Math.max(sY, c)));
     histogram(o.rng || [], rW, 0, Math.round(rX / rW)).forEach((c) => rY = Math.max(rY, c));
   });
@@ -532,7 +542,7 @@ function renderSessions() {
   sY = niceY(sY); rY = niceY(rY);
 
   box.innerHTML = CFG.sessions.map((c, s) => {
-    const o = d.sess[s], zr = zOf(S.idx, s, 'cnt'), zc = zColor(zr.z);
+    const o = d.cur[s], zr = zOf(S.idx, s, 'cnt'), zc = zColor(zr.z);
     const body = o.bars ? `
       <div class="sec">波段點數</div>
       ${tileRow('up', '上漲波', o.up, '段數', zOf(S.idx, s, 'upMed'), '點')}
@@ -541,18 +551,18 @@ function renderSessions() {
         <div><div class="clabel"><i style="background:var(--up)"></i>上漲波分布</div><div class="cbox h200"><canvas id="su${s}"></canvas></div></div>
         <div><div class="clabel"><i style="background:var(--dn)"></i>下跌波分布</div><div class="cbox h200"><canvas id="sd${s}"></canvas></div></div>
       </div>
-      <div class="sec">5 分 K 振幅（最高 − 最低）</div>
+      <div class="sec">${KL()} 振幅（最高 − 最低）</div>
       ${tileRow('rg', '振幅', o.rng || [], '根數', zOf(S.idx, s, 'rngMed'), '點')}
       <div class="clabel"><i style="background:${c.color}"></i>振幅分布</div>
       <div class="cbox h200"><canvas id="sr${s}"></canvas></div>
       <div class="note">白色曲線＝依平均與標準差畫出的常態分布　┆ 白色虛線＝平均　│ 彩色實線＝中位數　三個時段使用相同刻度　最右邊一格＝該值以上全部（滑鼠移上去看）</div>`
       : '<div class="empty">這個時段還沒有資料</div>';
     return `<div class="scard" style="--c:${c.color}">
-      <div class="shead"><div><div class="sname">${c.name}</div><div class="stime">${sessTime(d, s)} · ${o.bars} 根 5 分 K</div></div>
+      <div class="shead"><div><div class="sname">${c.name}</div><div class="stime">${sessTime(d, s)} · ${o.bars} 根 ${KL()}</div></div>
       <div class="scount">波段 <b>${fmt(o.cnt)}</b> 段 <span class="z" style="background:${zc.bg};color:${zc.fg}">${zText(zr.z)}</span></div></div>${body}</div>`;
   }).join('');
 
-  d.sess.forEach((o, s) => {
+  d.cur.forEach((o, s) => {
     if (!o.bars) return;
     histChart('su' + s, o.up, UP, sW, sX, sY, '點數');
     histChart('sd' + s, o.dn, DN, sW, sX, sY, '點數');
@@ -561,7 +571,7 @@ function renderSessions() {
 }
 
 /* ===== 分頁與趨勢 ===== */
-const TABS = [{ key: 'day', name: '當日分布' }, { key: 'trend', name: '趨勢（5K 振幅＋波段點數＋時段總振幅）' }];
+const TABS = [{ key: 'day', name: '當日分布' }, { key: 'trend', name: '趨勢（K 棒振幅＋波段點數＋時段總振幅）' }];
 const BOX_LEGEND = `<div class="boxlegend">
   <span><i style="width:2px;height:12px;background:#8a91a0"></i>細線＝去掉極端值後的範圍（完整最小、最大看滑鼠提示）</span>
   <span><i style="width:12px;height:10px;border:1.5px solid #8a91a0;border-radius:2px"></i>方塊＝25% 到 75%</span>
@@ -610,7 +620,7 @@ function lineCompare(id, idx, series, yTitle) {
     options: {
       responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, layout: { padding: { top: 8 } },
       plugins: { legend: { display: true, position: 'top', align: 'end', labels: { boxWidth: 12, boxHeight: 3, color: '#c4c9d4' } }, tooltip: { ...tooltipStyle, callbacks: { label: (t) => ` ${t.dataset.label}  ${fmt(t.raw, 1)} 點` } } },
-      scales: { x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } }, y: { grid: { color: '#1b1f29' }, title: { display: true, text: yTitle }, ticks: { callback: (v) => fmt(v) } } },
+      scales: { x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } }, y: { grid: { color: '#1b1f29' }, title: { display: true, text: yTitle }, ticks: { callback: (v) => fmt(v, Number.isInteger(v) ? 0 : 1) } } },
     },
   });
 }
@@ -792,26 +802,26 @@ function binLegendHtml(edges, color, word) {
 }
 const DOT_LEGEND = `<div class="boxlegend"><span><i style="width:12px;height:10px;border:1.5px solid #8a91a0;background:rgba(138,145,160,.25);border-radius:2px"></i>方塊＝一半的{W}在這裡（上緣 75%、下緣 25%）</span><span><i style="width:9px;height:9px;border-radius:50%;background:#fff;border:2px solid #8a91a0"></i>大白點＝中位數</span><span><i style="width:6px;height:6px;border-radius:50%;background:#8a91a0"></i>小點＝方塊外的{W}，一顆一個（離方塊越遠越極端）</span></div>`;
 function distLegend(kind, edges, color) {
-  const w = kind === 'rng' ? '根 5 分 K' : '波段';
-  if (S.view === 'band') return `<div class="boxlegend"><span><i style="width:14px;height:10px;border-radius:2px;background:${hexA(color, .35)};border-top:2px solid ${color};border-bottom:2px solid ${color}"></i>色帶＝一半的${kind === 'rng' ? ' 5 分 K ' : '波段'}在這裡（上緣 75%、下緣 25%）</span><span><i style="width:14px;height:1.5px;background:rgba(232,234,238,.55)"></i>細灰線＝中位數</span><span>帶子往上＝變大　帶子變寬＝大小越來越不一致</span></div>`;
+  const w = kind === 'rng' ? `根 ${KL()}` : '波段';
+  if (S.view === 'band') return `<div class="boxlegend"><span><i style="width:14px;height:10px;border-radius:2px;background:${hexA(color, .35)};border-top:2px solid ${color};border-bottom:2px solid ${color}"></i>色帶＝一半的${kind === 'rng' ? ` ${KL()} ` : '波段'}在這裡（上緣 75%、下緣 25%）</span><span><i style="width:14px;height:1.5px;background:rgba(232,234,238,.55)"></i>細灰線＝中位數</span><span>帶子往上＝變大　帶子變寬＝大小越來越不一致</span></div>`;
   if (S.view === 'dots') return DOT_LEGEND.replaceAll('{W}', w);
-  if (S.view === 'bins') return binLegendHtml(edges, color, kind === 'rng' ? '的 5 分 K 根數' : '的波段數');
+  if (S.view === 'bins') return binLegendHtml(edges, color, kind === 'rng' ? `的 ${KL()} 根數` : '的波段數');
   return BOX_LEGEND;
 }
 
 function renderTrendTab() {
   const idx = rangeIdx(), box = $('#tab-trend');
-  const ofKey = (s, key) => idx.map((i) => DAYS[i].sess[s][key] ?? null);
+  const ofKey = (s, key) => idx.map((i) => DAYS[i].cur[s][key] ?? null);
   const ser = (key) => CFG.sessions.map((c, s) => ({ name: c.name, color: c.color, data: ofKey(s, key) }));
-  const allR = idx.flatMap((i) => DAYS[i].sess.flatMap((o) => o.rng || []));
-  const allS = idx.flatMap((i) => DAYS[i].sess.flatMap((o) => [...o.up, ...o.dn]));
+  const allR = idx.flatMap((i) => DAYS[i].cur.flatMap((o) => o.rng || []));
+  const allS = idx.flatMap((i) => DAYS[i].cur.flatMap((o) => [...o.up, ...o.dn]));
   const eR = binEdges(allR), eS = binEdges(allS);   // 級距：三個時段共用，上漲／下跌共用
   const chips = (key) => CFG.sessions.map((c, s) => trendChip(c, c.name, ofKey(s, key))).join('');
   box.innerHTML = `
     <div class="grp-title">三個時段比較　·　${rangeTitle(idx)}</div>
     <section class="trio">
       <div class="panel">
-        <div class="phead"><div><div class="ptitle">5 分 K 振幅中位數</div><div class="psub">每根 5 分 K 最高 − 最低，取當天該時段的中位數</div></div></div>
+        <div class="phead"><div><div class="ptitle">${KL()} 振幅中位數</div><div class="psub">每根 ${KL()} 最高 − 最低，取當天該時段的中位數</div></div></div>
         <div class="cbox grow"><canvas id="rcmp"></canvas></div>
         <div class="trendchips">${chips('rngMed')}</div>
       </div>
@@ -830,23 +840,23 @@ function renderTrendTab() {
         <div class="trendchips">${chips('amp')}</div>
       </div>
     </section>
-    <div class="grp-title">各時段明細　·　${{ band: '區間帶：只看 25%～75%（一半的波段）怎麼變，三個時段同一個刻度', dots: '散點：方塊＝25%～75%，大白點＝中位數，方塊外的每一個波段（或 5 分 K）畫成一顆小點', bins: '分級：每天依大小分成 小／中／大／特大，疊起來看各有幾個（級距依這段期間的資料自動決定，三個時段共用）', box: '箱形圖' }[S.view]}</div>
+    <div class="grp-title">各時段明細　·　${{ band: '區間帶：只看 25%～75%（一半的波段）怎麼變，三個時段同一個刻度', dots: `散點：方塊＝25%～75%，大白點＝中位數，方塊外的每一個波段（或 ${KL()}）畫成一顆小點`, bins: '分級：每天依大小分成 小／中／大／特大，疊起來看各有幾個（級距依這段期間的資料自動決定，三個時段共用）', box: '箱形圖' }[S.view]}</div>
     <section class="sessgrid">${CFG.sessions.map((c, s) => `
       <div class="scard" style="--c:${c.color}">
         <div class="shead"><div><div class="sname">${c.name}</div><div class="stime">每日分布</div></div></div>
         <div class="ttl"><i style="background:${c.color}"></i>時段總振幅</div>
         <div class="trendchips" style="margin:0 0 8px">${trendChip(c, '總振幅', ofKey(s, 'amp'))}</div>
         <div class="cbox h200"><canvas id="abox${s}"></canvas></div>
-        <div class="ttl"><i style="background:${c.color}"></i>5 分 K 振幅</div>
-        <div class="trendchips" style="margin:0 0 6px">${S.view === 'band' ? bandChips(c, idx, (i) => DAYS[i].sess[s].rng) : trendChip(c, '中位數', ofKey(s, 'rngMed')) + trendChip(c, '75%', idx.map((i) => pctl(DAYS[i].sess[s].rng || [], .75)))}</div>
+        <div class="ttl"><i style="background:${c.color}"></i>${KL()} 振幅</div>
+        <div class="trendchips" style="margin:0 0 6px">${S.view === 'band' ? bandChips(c, idx, (i) => DAYS[i].cur[s].rng) : trendChip(c, '中位數', ofKey(s, 'rngMed')) + trendChip(c, '75%', idx.map((i) => pctl(DAYS[i].cur[s].rng || [], .75)))}</div>
         <div class="cbox h240"><canvas id="rbox${s}"></canvas></div>
         ${S.view === 'bins' || S.view === 'band' ? distLegend('rng', eR, c.color) : ''}
         <div class="ttl"><i style="background:var(--up)"></i>上漲波</div>
-        <div class="trendchips" style="margin:0 0 8px">${S.view === 'band' ? bandChips(c, idx, (i) => DAYS[i].sess[s].up) : trendChip(c, '中位數', ofKey(s, 'upMed'))}</div>
+        <div class="trendchips" style="margin:0 0 8px">${S.view === 'band' ? bandChips(c, idx, (i) => DAYS[i].cur[s].up) : trendChip(c, '中位數', ofKey(s, 'upMed'))}</div>
         <div class="cbox h240"><canvas id="ubox${s}"></canvas></div>
         ${S.view === 'bins' || S.view === 'band' ? distLegend('swg', eS, UP) : ''}
         <div class="ttl"><i style="background:var(--dn)"></i>下跌波</div>
-        <div class="trendchips" style="margin:0 0 8px">${S.view === 'band' ? bandChips(c, idx, (i) => DAYS[i].sess[s].dn) : trendChip(c, '中位數', ofKey(s, 'dnMed'))}</div>
+        <div class="trendchips" style="margin:0 0 8px">${S.view === 'band' ? bandChips(c, idx, (i) => DAYS[i].cur[s].dn) : trendChip(c, '中位數', ofKey(s, 'dnMed'))}</div>
         <div class="cbox h240"><canvas id="dbox${s}"></canvas></div>
         ${S.view === 'bins' || S.view === 'band' ? distLegend('swg', eS, DN) : distLegend('swg', null, c.color)}
       </div>`).join('')}</section>`;
@@ -854,20 +864,20 @@ function renderTrendTab() {
   lineCompare('ucmp', idx, ser('upMed'), '點');
   lineCompare('dcmp', idx, ser('dnMed'), '點');
   lineCompare('acmp', idx, ser('amp'), '總振幅（點）');
-  const yR = sharedMax(idx.flatMap((i) => DAYS[i].sess.map((o) => o.rng || [])));
-  const yS = sharedMax(idx.flatMap((i) => DAYS[i].sess.flatMap((o) => [o.up, o.dn])));
-  const ampAll = idx.flatMap((i) => DAYS[i].sess.map((o) => o.amp)).filter((v) => v != null);
+  const yR = sharedMax(idx.flatMap((i) => DAYS[i].cur.map((o) => o.rng || [])));
+  const yS = sharedMax(idx.flatMap((i) => DAYS[i].cur.flatMap((o) => [o.up, o.dn])));
+  const ampAll = idx.flatMap((i) => DAYS[i].cur.map((o) => o.amp)).filter((v) => v != null);
   const yA = ampAll.length ? (() => { const m = Math.max(...ampAll), st = m <= 100 ? 10 : m <= 300 ? 25 : m <= 1000 ? 50 : 100; return Math.ceil(m * 1.05 / st) * st; })() : undefined;
   // 散點：刻度用全部的最大值（大波段也看得到）；分級：段數刻度三個時段共用
-  const dR = dotMax(idx.flatMap((i) => DAYS[i].sess.map((o) => o.rng))), dS = dotMax(idx.flatMap((i) => DAYS[i].sess.flatMap((o) => [o.up, o.dn])));
-  const cMax = (f) => { let m = 0; idx.forEach((i) => DAYS[i].sess.forEach((o) => { m = Math.max(m, f(o)); })); return Math.ceil(m * 1.08) || undefined; };
+  const dR = dotMax(idx.flatMap((i) => DAYS[i].cur.map((o) => o.rng))), dS = dotMax(idx.flatMap((i) => DAYS[i].cur.flatMap((o) => [o.up, o.dn])));
+  const cMax = (f) => { let m = 0; idx.forEach((i) => DAYS[i].cur.forEach((o) => { m = Math.max(m, f(o)); })); return Math.ceil(m * 1.08) || undefined; };
   const bR = cMax((o) => (o.rng || []).length), bS = cMax((o) => Math.max(o.up.length, o.dn.length));
   CFG.sessions.forEach((c, s) => {
     ampBarChart('abox' + s, idx, ofKey(s, 'amp'), c.color, yA);
-    const g = { rng: (i) => DAYS[i].sess[s].rng, up: (i) => DAYS[i].sess[s].up, dn: (i) => DAYS[i].sess[s].dn };
+    const g = { rng: (i) => DAYS[i].cur[s].rng, up: (i) => DAYS[i].cur[s].up, dn: (i) => DAYS[i].cur[s].dn };
     if (S.view === 'band') {
-      const rR = bandRange(idx.flatMap((i) => DAYS[i].sess.map((o) => o.rng)));
-      const rU = bandRange(idx.flatMap((i) => DAYS[i].sess.map((o) => o.up))), rD = bandRange(idx.flatMap((i) => DAYS[i].sess.map((o) => o.dn)));
+      const rR = bandRange(idx.flatMap((i) => DAYS[i].cur.map((o) => o.rng)));
+      const rU = bandRange(idx.flatMap((i) => DAYS[i].cur.map((o) => o.up))), rD = bandRange(idx.flatMap((i) => DAYS[i].cur.map((o) => o.dn)));
       const rS = [Math.min(rU[0] ?? 0, rD[0] ?? 0), Math.max(rU[1] ?? 0, rD[1] ?? 0)];   // 上漲、下跌同一個刻度
       bandChart('rbox' + s, idx, g.rng, c.color, '根數', rR);
       bandChart('ubox' + s, idx, g.up, UP, '段數', rS);
@@ -890,6 +900,8 @@ function renderTrendTab() {
 
 function renderAll() {
   Object.keys(charts).forEach((k) => { charts[k].destroy(); delete charts[k]; });
+  DAYS.forEach((d) => { Object.defineProperty(d, 'cur', { value: S.tf === 1 && d.sess1 ? d.sess1 : d.sess, configurable: true, enumerable: false }); });
+  $('#meta').textContent = `${KL()} · 前後各 ${CFG.pivotN} 根定義轉折 · 亞 / 歐 / 美盤`;
   renderControls(); renderTabs();
   if (S.tab === 'day') renderSessions(); else renderTrendTab();
 }
