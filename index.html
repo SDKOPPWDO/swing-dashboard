@@ -222,6 +222,7 @@ tr.sel td{outline:1px solid var(--acc);outline-offset:-1px}
     <div class="ctl"><span>選擇日期</span><select id="daySel"></select></div>
     <div class="ctl" id="zCtl"><span>常態分數基準</span><div class="seg" id="zSeg"></div></div>
     <div class="ctl" id="rangeCtl" hidden><span>趨勢區間（到選定日期為止）</span><div class="seg" id="rangeSeg"></div></div>
+    <div class="ctl" id="viewCtl" hidden><span>分布圖樣式</span><div class="seg" id="viewSeg"></div></div>
   </section>
 
   <nav class="tabs" id="tabs"></nav>
@@ -275,7 +276,7 @@ const STORE_KEY = 'swing-dashboard-v5';   // v5：多了時段總振幅，舊的
 
 /* ===== 狀態 ===== */
 let DAYS = [];
-const S = { idx: -1, zN: 20, tab: 'day', range: 5 };
+const S = { idx: -1, zN: 20, tab: 'day', range: 5, view: (() => { try { return localStorage.getItem('swing-dashboard-view') || 'dots'; } catch (e) { return 'dots'; } })() };
 const charts = {};
 const $ = (s) => document.querySelector(s);
 
@@ -574,6 +575,8 @@ function renderTabs() {
   $('#rangeCtl').hidden = S.tab === 'day';
   $('#zCtl').hidden = S.tab !== 'day';
   seg($('#rangeSeg'), [3, 5, 10, 20, 60].map((v) => ({ value: v, label: `近 ${v} 天` })), S.range, (v) => { S.range = v; renderAll(); });
+  $('#viewCtl').hidden = S.tab === 'day';
+  seg($('#viewSeg'), [{ value: 'band', label: '〰 區間帶' }, { value: 'dots', label: '● 散點' }, { value: 'bins', label: '▤ 分級' }, { value: 'box', label: '▯ 箱形圖' }], S.view, (v) => { S.view = v; try { localStorage.setItem('swing-dashboard-view', v); } catch (e) { /* 忽略 */ } renderAll(); });
 }
 
 function rangeIdx() {
@@ -659,10 +662,150 @@ function ampBarChart(id, idx, vals, color, ymax) {
   });
 }
 
+/* ===== 分布圖：散點（每個波段一顆點） ===== */
+// 同一天的點左右散開一點（固定的偽隨機，重畫不會跳來跳去）
+const jit = (k) => { const x = Math.sin(k * 12.9898 + 78.233) * 43758.5453; return x - Math.floor(x) - 0.5; };
+// 散點＋方塊：方塊＝25%～75%（上緣 75%、下緣 25%），大點＝中位數；方塊外（25% 以下、75% 以上）每個一顆小點
+Chart.register({
+  id: 'iqrBoxes',
+  beforeDatasetsDraw(chart) {
+    const o = chart.options.plugins.iqrBoxes; if (!o || !o.boxes) return;
+    const { ctx, chartArea: a, scales: { x, y } } = chart;
+    const bw = Math.max(6, Math.min(46, Math.abs(x.getPixelForValue(1) - x.getPixelForValue(0)) * 0.55));
+    ctx.save(); ctx.beginPath(); ctx.rect(a.left, a.top, a.right - a.left, a.bottom - a.top); ctx.clip();
+    o.boxes.forEach((bx) => {
+      if (!bx) return;
+      const cx = x.getPixelForValue(bx.x), yt = y.getPixelForValue(bx.hi), yb = y.getPixelForValue(bx.lo);
+      const h = Math.max(1.5, yb - yt);
+      ctx.fillStyle = hexA(o.color, .28); ctx.fillRect(cx - bw / 2, yt, bw, h);
+      ctx.strokeStyle = o.color; ctx.lineWidth = 1.5; ctx.strokeRect(cx - bw / 2 + .75, yt + .75, bw - 1.5, Math.max(.5, h - 1.5));
+    });
+    ctx.restore();
+  },
+});
+function dotChart(id, idx, getVals, color, unitWord, ymax) {
+  const pts = [], meds = [], boxes = [], S5 = [], many = idx.length > 20;
+  idx.forEach((di, i) => {
+    const v = getVals(di) || [], st = st5(v); S5.push(st);
+    if (!st) { meds.push({ x: i, y: null }); boxes.push(null); return; }
+    boxes.push({ x: i, lo: st.p25, hi: st.p75 });
+    meds.push({ x: i, y: st.med });
+    // 只畫方塊外面的：25% 以下、75% 以上
+    let k = 0;
+    v.forEach((y) => { if (y < st.p25 || y > st.p75) { k++; pts.push({ x: i + jit(k + i * 997) * (many ? 0.32 : 0.36), y }); } });
+  });
+  const r = pts.length > 2000 ? 1.6 : pts.length > 800 ? 2 : 2.8;
+  mkChart(id, {
+    type: 'scatter',
+    data: { datasets: [
+      { label: '方塊外', data: pts, backgroundColor: hexA(color, .62), borderWidth: 0, pointRadius: r, pointHoverRadius: r + 2, order: 2 },
+      { label: '中位數', data: meds, backgroundColor: '#ffffff', borderColor: color, borderWidth: 2.5, pointRadius: many ? 4 : 6, pointHoverRadius: many ? 6 : 8, order: 1 },
+    ] },
+    options: {
+      responsive: true, maintainAspectRatio: false, layout: { padding: { top: 8 } },
+      plugins: { legend: { display: false }, iqrBoxes: { boxes, color }, tooltip: { ...tooltipStyle, displayColors: false, callbacks: {
+        title: (t) => DAYS[idx[Math.round(t[0].raw.x)]].date,
+        label: (t) => {
+          if (t.datasetIndex === 1) { const s = S5[t.raw.x]; return s ? [`${unitWord} ${s.n}`, `最大 ${fmt(s.max, 1)}`, `75%  ${fmt(s.p75, 1)}`, `中位數 ${fmt(s.med, 1)}`, `25%  ${fmt(s.p25, 1)}`, `最小 ${fmt(s.min, 1)}`] : '無資料'; }
+          return ` ${fmt(t.raw.y, 1)} 點`;
+        } } } },
+      scales: {
+        x: { type: 'linear', min: -0.6, max: idx.length - 0.4, grid: { display: false }, afterBuildTicks: (ax) => { const st = Math.max(1, Math.ceil(idx.length / 12)); ax.ticks = idx.map((_, i) => ({ value: i })).filter((t) => t.value % st === 0); }, ticks: { maxRotation: 0, autoSkip: false, callback: (v) => (Number.isInteger(v) && idx[v] != null ? DAYS[idx[v]].date.slice(5) : '') } },
+        y: { beginAtZero: true, max: ymax, grid: { color: '#1b1f29' }, title: { display: true, text: '點' }, ticks: { callback: (v) => fmt(v) } },
+      },
+    },
+  });
+}
+/* ===== 分布圖：區間帶（25%～75% 塗色，虛線＝上下緣的趨勢線） ===== */
+const p25of = (a) => (a && a.length ? pctl(a, .25) : null), p75of = (a) => (a && a.length ? pctl(a, .75) : null);
+function bandChart(id, idx, getVals, color, unitWord, yr) {
+  const hi = idx.map((i) => p75of(getVals(i))), lo = idx.map((i) => p25of(getVals(i))), md = idx.map((i) => { const v = getVals(i); return v && v.length ? med(v) : null; });
+  const tH = trendOf(hi), tL = trendOf(lo), many = idx.length > 20, pr = many ? 1.5 : 3;
+  const ds = [
+    { label: '75%', data: hi, borderColor: color, backgroundColor: hexA(color, .26), borderWidth: 2.2, pointRadius: pr, pointBackgroundColor: color, fill: '+1', tension: .25, spanGaps: true, order: 2 },
+    { label: '25%', data: lo, borderColor: color, backgroundColor: hexA(color, .26), borderWidth: 2.2, pointRadius: pr, pointBackgroundColor: color, fill: false, tension: .25, spanGaps: true, order: 2 },
+    { label: '中位數', data: md, borderColor: hexA('#e8eaee', .55), borderWidth: 1.2, pointRadius: 0, fill: false, tension: .25, spanGaps: true, order: 3 },
+  ];
+  mkChart(id, {
+    type: 'line',
+    data: { labels: idx.map((i) => DAYS[i].date.slice(5)), datasets: ds },
+    options: {
+      responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, layout: { padding: { top: 8 } },
+      plugins: { legend: { display: false }, tooltip: { ...tooltipStyle, displayColors: false, filter: (t) => t.datasetIndex === 0, callbacks: {
+        title: (t) => DAYS[idx[t[0].dataIndex]].date,
+        label: (t) => { const k = t.dataIndex; if (hi[k] == null) return '無資料'; return [`75%（上緣） ${fmt(hi[k], 1)} 點`, `中位數 ${fmt(md[k], 1)} 點`, `25%（下緣） ${fmt(lo[k], 1)} 點`, `寬度 ${fmt(hi[k] - lo[k], 1)} 點`, `${unitWord} ${(getVals(idx[k]) || []).length}`]; },
+      } } },
+      scales: { x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } }, y: { min: yr[0], max: yr[1], grid: { color: '#1b1f29' }, title: { display: true, text: '點' }, ticks: { callback: (v) => fmt(v) } } },
+    },
+  });
+}
+// 刻度：三個時段共用（下緣最低～上緣最高，上下多留一點）
+function bandRange(lists) {
+  let lo = Infinity, hi = -Infinity;
+  lists.forEach((a) => { if (!a || !a.length) return; lo = Math.min(lo, pctl(a, .25)); hi = Math.max(hi, pctl(a, .75)); });
+  if (!isFinite(lo)) return [undefined, undefined];
+  const pad = (hi - lo) * 0.12 || 1, st = hi <= 50 ? 5 : hi <= 200 ? 10 : 25;
+  return [Math.max(0, Math.floor((lo - pad) / st) * st), Math.ceil((hi + pad) / st) * st];
+}
+// 區間帶的三個趨勢標籤：上緣、下緣、寬度
+function bandChips(c, idx, getVals) {
+  const hi = idx.map((i) => p75of(getVals(i))), lo = idx.map((i) => p25of(getVals(i)));
+  const w = hi.map((h, k) => (h == null || lo[k] == null ? null : h - lo[k]));
+  return trendChip(c, '75% 上緣', hi) + trendChip(c, '25% 下緣', lo) + trendChip(c, '寬度', w);
+}
+function dotMax(lists) { let m = 0; lists.forEach((a) => (a || []).forEach((v) => { if (v > m) m = v; })); const st = m <= 50 ? 5 : m <= 100 ? 10 : m <= 300 ? 25 : 50; return Math.ceil(m * 1.04 / st) * st || undefined; }
+
+/* ===== 分布圖：分級堆疊（小／中／大／特大 各幾個） ===== */
+// 級距：用這段期間所有數值的 50%、80%、95% 位置，取整數好記
+function binEdges(all) {
+  if (!all.length) return [10, 20, 40];
+  const nice = (v) => { const st = v < 10 ? 1 : v < 50 ? 5 : v < 200 ? 10 : 25; return Math.max(st, Math.round(v / st) * st); };
+  const e = [pctl(all, .5), pctl(all, .8), pctl(all, .95)].map(nice);
+  for (let i = 1; i < e.length; i++) if (e[i] <= e[i - 1]) e[i] = e[i - 1] + (e[i - 1] < 50 ? 5 : 10);
+  return e;
+}
+function binLabels(e) { return [`< ${fmt(e[0])}`, `${fmt(e[0])}–${fmt(e[1])}`, `${fmt(e[1])}–${fmt(e[2])}`, `≥ ${fmt(e[2])}`]; }
+const BIN_NAMES = ['小', '中', '大', '特大'];
+const BIN_ALPHA = [.18, .42, .7, 1];
+function binChart(id, idx, getVals, color, unitWord, edges, ymax) {
+  const lab = binLabels(edges);
+  const cnt = idx.map((di) => { const c = [0, 0, 0, 0]; (getVals(di) || []).forEach((v) => { let k = 0; while (k < 3 && v >= edges[k]) k++; c[k]++; }); return c; });
+  mkChart(id, {
+    type: 'bar',
+    data: { labels: idx.map((i) => DAYS[i].date.slice(5)), datasets: [3, 2, 1, 0].map((k) => ({
+      label: `${BIN_NAMES[k]}（${lab[k]} 點）`, data: cnt.map((c) => c[k]), backgroundColor: hexA(color, BIN_ALPHA[k]), borderColor: hexA(color, Math.min(1, BIN_ALPHA[k] + .3)), borderWidth: { top: 1, bottom: 0, left: 0, right: 0 }, stack: 's', barPercentage: idx.length > 20 ? .85 : .6,
+    })) },
+    options: {
+      responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, layout: { padding: { top: 8 } },
+      plugins: { legend: { display: false }, tooltip: { ...tooltipStyle, itemSort: (a, b) => b.datasetIndex - a.datasetIndex, callbacks: {
+        title: (t) => DAYS[idx[t[0].dataIndex]].date,
+        label: (t) => { const c = cnt[t.dataIndex], tot = c.reduce((a, b) => a + b, 0); return ` ${t.dataset.label}  ${t.raw} ${unitWord === '根數' ? '根' : '段'}${tot ? `（${fmt(t.raw / tot * 100)}%）` : ''}`; },
+        footer: (t) => { const tot = cnt[t[0].dataIndex].reduce((a, b) => a + b, 0); return `合計 ${tot} ${unitWord === '根數' ? '根' : '段'}`; },
+      } } },
+      scales: { x: { stacked: true, grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } }, y: { stacked: true, beginAtZero: true, max: ymax, grid: { color: '#1b1f29' }, title: { display: true, text: unitWord === '根數' ? '根數' : '段數' }, ticks: { precision: 0 } } },
+    },
+  });
+}
+function binLegendHtml(edges, color, word) {
+  const lab = binLabels(edges);
+  return `<div class="boxlegend">${[0, 1, 2, 3].map((k) => `<span><i style="width:12px;height:10px;border-radius:2px;background:${hexA(color, BIN_ALPHA[k])};border:1px solid ${hexA(color, Math.min(1, BIN_ALPHA[k] + .3))}"></i>${BIN_NAMES[k]} ${lab[k]} 點</span>`).join('')}<span>　長條總高＝當天${word}</span></div>`;
+}
+const DOT_LEGEND = `<div class="boxlegend"><span><i style="width:12px;height:10px;border:1.5px solid #8a91a0;background:rgba(138,145,160,.25);border-radius:2px"></i>方塊＝一半的{W}在這裡（上緣 75%、下緣 25%）</span><span><i style="width:9px;height:9px;border-radius:50%;background:#fff;border:2px solid #8a91a0"></i>大白點＝中位數</span><span><i style="width:6px;height:6px;border-radius:50%;background:#8a91a0"></i>小點＝方塊外的{W}，一顆一個（離方塊越遠越極端）</span></div>`;
+function distLegend(kind, edges, color) {
+  const w = kind === 'rng' ? '根 5 分 K' : '波段';
+  if (S.view === 'band') return `<div class="boxlegend"><span><i style="width:14px;height:10px;border-radius:2px;background:${hexA(color, .35)};border-top:2px solid ${color};border-bottom:2px solid ${color}"></i>色帶＝一半的${kind === 'rng' ? ' 5 分 K ' : '波段'}在這裡（上緣 75%、下緣 25%）</span><span><i style="width:14px;height:1.5px;background:rgba(232,234,238,.55)"></i>細灰線＝中位數</span><span>帶子往上＝變大　帶子變寬＝大小越來越不一致</span></div>`;
+  if (S.view === 'dots') return DOT_LEGEND.replaceAll('{W}', w);
+  if (S.view === 'bins') return binLegendHtml(edges, color, kind === 'rng' ? '的 5 分 K 根數' : '的波段數');
+  return BOX_LEGEND;
+}
+
 function renderTrendTab() {
   const idx = rangeIdx(), box = $('#tab-trend');
   const ofKey = (s, key) => idx.map((i) => DAYS[i].sess[s][key] ?? null);
   const ser = (key) => CFG.sessions.map((c, s) => ({ name: c.name, color: c.color, data: ofKey(s, key) }));
+  const allR = idx.flatMap((i) => DAYS[i].sess.flatMap((o) => o.rng || []));
+  const allS = idx.flatMap((i) => DAYS[i].sess.flatMap((o) => [...o.up, ...o.dn]));
+  const eR = binEdges(allR), eS = binEdges(allS);   // 級距：三個時段共用，上漲／下跌共用
   const chips = (key) => CFG.sessions.map((c, s) => trendChip(c, c.name, ofKey(s, key))).join('');
   box.innerHTML = `
     <div class="grp-title">三個時段比較　·　${rangeTitle(idx)}</div>
@@ -687,7 +830,7 @@ function renderTrendTab() {
         <div class="trendchips">${chips('amp')}</div>
       </div>
     </section>
-    <div class="grp-title">各時段明細</div>
+    <div class="grp-title">各時段明細　·　${{ band: '區間帶：只看 25%～75%（一半的波段）怎麼變，三個時段同一個刻度', dots: '散點：方塊＝25%～75%，大白點＝中位數，方塊外的每一個波段（或 5 分 K）畫成一顆小點', bins: '分級：每天依大小分成 小／中／大／特大，疊起來看各有幾個（級距依這段期間的資料自動決定，三個時段共用）', box: '箱形圖' }[S.view]}</div>
     <section class="sessgrid">${CFG.sessions.map((c, s) => `
       <div class="scard" style="--c:${c.color}">
         <div class="shead"><div><div class="sname">${c.name}</div><div class="stime">每日分布</div></div></div>
@@ -695,15 +838,17 @@ function renderTrendTab() {
         <div class="trendchips" style="margin:0 0 8px">${trendChip(c, '總振幅', ofKey(s, 'amp'))}</div>
         <div class="cbox h200"><canvas id="abox${s}"></canvas></div>
         <div class="ttl"><i style="background:${c.color}"></i>5 分 K 振幅</div>
-        <div class="trendchips" style="margin:0 0 6px">${trendChip(c, '中位數', ofKey(s, 'rngMed'))}${trendChip(c, '75%', idx.map((i) => pctl(DAYS[i].sess[s].rng || [], .75)))}</div>
+        <div class="trendchips" style="margin:0 0 6px">${S.view === 'band' ? bandChips(c, idx, (i) => DAYS[i].sess[s].rng) : trendChip(c, '中位數', ofKey(s, 'rngMed')) + trendChip(c, '75%', idx.map((i) => pctl(DAYS[i].sess[s].rng || [], .75)))}</div>
         <div class="cbox h240"><canvas id="rbox${s}"></canvas></div>
+        ${S.view === 'bins' || S.view === 'band' ? distLegend('rng', eR, c.color) : ''}
         <div class="ttl"><i style="background:var(--up)"></i>上漲波</div>
-        <div class="trendchips" style="margin:0 0 8px">${trendChip(c, '中位數', ofKey(s, 'upMed'))}</div>
+        <div class="trendchips" style="margin:0 0 8px">${S.view === 'band' ? bandChips(c, idx, (i) => DAYS[i].sess[s].up) : trendChip(c, '中位數', ofKey(s, 'upMed'))}</div>
         <div class="cbox h240"><canvas id="ubox${s}"></canvas></div>
+        ${S.view === 'bins' || S.view === 'band' ? distLegend('swg', eS, UP) : ''}
         <div class="ttl"><i style="background:var(--dn)"></i>下跌波</div>
-        <div class="trendchips" style="margin:0 0 8px">${trendChip(c, '中位數', ofKey(s, 'dnMed'))}</div>
+        <div class="trendchips" style="margin:0 0 8px">${S.view === 'band' ? bandChips(c, idx, (i) => DAYS[i].sess[s].dn) : trendChip(c, '中位數', ofKey(s, 'dnMed'))}</div>
         <div class="cbox h240"><canvas id="dbox${s}"></canvas></div>
-        ${BOX_LEGEND}
+        ${S.view === 'bins' || S.view === 'band' ? distLegend('swg', eS, DN) : distLegend('swg', null, c.color)}
       </div>`).join('')}</section>`;
   lineCompare('rcmp', idx, ser('rngMed'), '振幅中位數（點）');
   lineCompare('ucmp', idx, ser('upMed'), '點');
@@ -713,11 +858,33 @@ function renderTrendTab() {
   const yS = sharedMax(idx.flatMap((i) => DAYS[i].sess.flatMap((o) => [o.up, o.dn])));
   const ampAll = idx.flatMap((i) => DAYS[i].sess.map((o) => o.amp)).filter((v) => v != null);
   const yA = ampAll.length ? (() => { const m = Math.max(...ampAll), st = m <= 100 ? 10 : m <= 300 ? 25 : m <= 1000 ? 50 : 100; return Math.ceil(m * 1.05 / st) * st; })() : undefined;
+  // 散點：刻度用全部的最大值（大波段也看得到）；分級：段數刻度三個時段共用
+  const dR = dotMax(idx.flatMap((i) => DAYS[i].sess.map((o) => o.rng))), dS = dotMax(idx.flatMap((i) => DAYS[i].sess.flatMap((o) => [o.up, o.dn])));
+  const cMax = (f) => { let m = 0; idx.forEach((i) => DAYS[i].sess.forEach((o) => { m = Math.max(m, f(o)); })); return Math.ceil(m * 1.08) || undefined; };
+  const bR = cMax((o) => (o.rng || []).length), bS = cMax((o) => Math.max(o.up.length, o.dn.length));
   CFG.sessions.forEach((c, s) => {
     ampBarChart('abox' + s, idx, ofKey(s, 'amp'), c.color, yA);
-    boxChart('rbox' + s, idx, (i) => DAYS[i].sess[s].rng, c.color, '根數', yR);
-    boxChart('ubox' + s, idx, (i) => DAYS[i].sess[s].up, UP, '段數', yS);
-    boxChart('dbox' + s, idx, (i) => DAYS[i].sess[s].dn, DN, '段數', yS);
+    const g = { rng: (i) => DAYS[i].sess[s].rng, up: (i) => DAYS[i].sess[s].up, dn: (i) => DAYS[i].sess[s].dn };
+    if (S.view === 'band') {
+      const rR = bandRange(idx.flatMap((i) => DAYS[i].sess.map((o) => o.rng)));
+      const rU = bandRange(idx.flatMap((i) => DAYS[i].sess.map((o) => o.up))), rD = bandRange(idx.flatMap((i) => DAYS[i].sess.map((o) => o.dn)));
+      const rS = [Math.min(rU[0] ?? 0, rD[0] ?? 0), Math.max(rU[1] ?? 0, rD[1] ?? 0)];   // 上漲、下跌同一個刻度
+      bandChart('rbox' + s, idx, g.rng, c.color, '根數', rR);
+      bandChart('ubox' + s, idx, g.up, UP, '段數', rS);
+      bandChart('dbox' + s, idx, g.dn, DN, '段數', rS);
+    } else if (S.view === 'dots') {
+      dotChart('rbox' + s, idx, g.rng, c.color, '根數', dR);
+      dotChart('ubox' + s, idx, g.up, UP, '段數', dS);
+      dotChart('dbox' + s, idx, g.dn, DN, '段數', dS);
+    } else if (S.view === 'bins') {
+      binChart('rbox' + s, idx, g.rng, c.color, '根數', eR, bR);
+      binChart('ubox' + s, idx, g.up, UP, '段數', eS, bS);
+      binChart('dbox' + s, idx, g.dn, DN, '段數', eS, bS);
+    } else {
+      boxChart('rbox' + s, idx, g.rng, c.color, '根數', yR);
+      boxChart('ubox' + s, idx, g.up, UP, '段數', yS);
+      boxChart('dbox' + s, idx, g.dn, DN, '段數', yS);
+    }
   });
 }
 
